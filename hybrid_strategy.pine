@@ -1,0 +1,468 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © EliasVictor
+// Hybrid Strategy v2.1: Trend/ORB/MTF with VIX/VXN/GVZ, Key Levels & Improved Dashboard
+//
+// CHangelog v2.1:
+// Added Live row to dashboard showing real-time forming candle data (Trend/VWAP/ORB)
+// Fixed MTF matrix repainting issue across chart timeframes
+// Live row uses native chart values for tick-by-tick awareness
+// Confirmed MTF rows shifted to rows 2-6
+
+// CHANGELOG v2:
+// - Merged features: VIX/VXN/GVZ display, user-configurable EMAs, improved colors
+// - Added Key Levels section (toggleable) with prices + proximity status:
+//   - Daily High/Low (current)
+//   - Previous Daily High/Low
+//   - Weekly High/Low (current)
+//   - Previous Weekly High/Low
+//   - ORB High/Low
+// - Added Daily level lines on chart with toggle
+// - Added Weekly level lines on chart with toggle
+// - Added EMA 200 with toggle
+// - Removed trailing stop plots from chart
+// - Navy/slate backgrounds for better text visibility
+// - GVZ uses neutral volatility labels (gold is a safe haven, high vol ≠ bearish)
+
+//@version=6
+indicator("Hybrid Strategy: Trend/ORB/MTF v2", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ==========================================
+// 1. Inputs - Session Settings
+// ==========================================
+grp_session = "Session Settings"
+
+s1StartHour   = input.int(9,  "S1 Start Hour", minval=0, maxval=23, group=grp_session)
+s1StartMinute = input.int(30, "S1 Start Minute", minval=0, maxval=59, group=grp_session)
+s1StopHour    = input.int(11, "S1 Stop Hour", minval=0, maxval=23, group=grp_session)
+s1StopMinute  = input.int(30, "S1 Stop Minute", minval=0, maxval=59, group=grp_session)
+
+useSession2   = input.bool(false, "Enable Afternoon Session", group=grp_session)
+s2StartHour   = input.int(15, "S2 Start Hour", minval=0, maxval=23, group=grp_session)
+s2StartMinute = input.int(0,  "S2 Start Minute", minval=0, maxval=59, group=grp_session)
+s2StopHour    = input.int(15, "S2 Stop Hour", minval=0, maxval=23, group=grp_session)
+s2StopMinute  = input.int(55, "S2 Stop Minute", minval=0, maxval=59, group=grp_session)
+
+// ==========================================
+// 2. Inputs - Execution Settings
+// ==========================================
+grp_exec = "Execution Settings"
+
+execMode = input.string("On Close (Confirmed)", "Breakout Execution", 
+           options=["On Close (Confirmed)", "Intrabar (Instant)"],
+           tooltip="On Close waits for candle to finish (recommended). Intrabar fires immediately when price crosses.",
+           group=grp_exec)
+
+breakoutTicks = input.int(0, "Breakout Buffer (Ticks)", minval=0, 
+                tooltip="Price must exceed OR level by this many ticks to trigger signal. 0 = original behavior.",
+                group=grp_exec)
+
+// ==========================================
+// 3. Inputs - Time & Timezone
+// ==========================================
+grp_time = "Timezone"
+tzInput  = input.string("America/New_York", "Timezone", 
+           options=["Exchange Timezone", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Europe/London", "UTC"], 
+           group=grp_time)
+tz       = tzInput == "Exchange Timezone" ? syminfo.timezone : tzInput
+
+// ==========================================
+// 4. Inputs - Strategy Settings
+// ==========================================
+grp_strat = "Strategy Settings"
+orbMins   = input.int(15, "Opening Range (mins)", minval=1, group=grp_strat)
+htf       = input.timeframe("60", "Trend Confirmation TF", group=grp_strat)
+src       = close
+
+// ==========================================
+// 5. Inputs - EMA Cloud Settings
+// ==========================================
+grp_ema    = "EMA Cloud Settings"
+ema1Len    = input.int(9, "EMA 1 Length", minval=1, group=grp_ema)
+ema2Len    = input.int(21, "EMA 2 Length", minval=1, group=grp_ema)
+showCloud  = input.bool(true, "Show EMA Cloud Fill", group=grp_ema)
+ema1Color  = input.color(color.rgb(255, 230, 0), "EMA 1 Color", group=grp_ema)
+ema2Color  = input.color(color.rgb(0, 225, 255), "EMA 2 Color", group=grp_ema)
+showEma200 = input.bool(true, "Show EMA 200", group=grp_ema)
+ema200Color = input.color(color.rgb(255, 255, 255), "EMA 200 Color", group=grp_ema)
+showVwap   = input.bool(true, "Show VWAP", group=grp_ema)
+vwapColor  = input.color(color.rgb(255, 0, 255), "VWAP Color", group=grp_ema)
+
+// ==========================================
+// 6. Inputs - Chart Level Settings
+// ==========================================
+grp_levels = "Chart Levels"
+showDailyLevels  = input.bool(false, "Show Daily Levels on Chart", group=grp_levels)
+showWeeklyLevels = input.bool(false, "Show Weekly Levels on Chart", group=grp_levels)
+
+dailyHiColor     = input.color(color.rgb(0, 200, 0), "Daily High Color", group=grp_levels)
+dailyLoColor     = input.color(color.rgb(200, 0, 0), "Daily Low Color", group=grp_levels)
+prevDailyHiColor = input.color(color.rgb(0, 200, 0, 50), "Prev Daily High Color", group=grp_levels)
+prevDailyLoColor = input.color(color.rgb(200, 0, 0, 50), "Prev Daily Low Color", group=grp_levels)
+
+weeklyHiColor    = input.color(color.rgb(0, 150, 255), "Weekly High Color", group=grp_levels)
+weeklyLoColor    = input.color(color.rgb(255, 150, 0), "Weekly Low Color", group=grp_levels)
+prevWeeklyHiColor = input.color(color.rgb(0, 150, 255, 50), "Prev Weekly High Color", group=grp_levels)
+prevWeeklyLoColor = input.color(color.rgb(255, 150, 0, 50), "Prev Weekly Low Color", group=grp_levels)
+
+// ==========================================
+// 7. Inputs - Dashboard Settings
+// ==========================================
+grp_dash   = "Dashboard Settings"
+showDash   = input.bool(true, "Show Dashboard", group=grp_dash)
+dashPos    = input.string("Top Right", "Position", options=["Top Right", "Bottom Right", "Top Left"], group=grp_dash)
+dashSize   = input.string("Small", "Text Size", options=["Tiny", "Small", "Normal"], group=grp_dash)
+showKeyLevels = input.bool(false, "Show Key Levels Section", group=grp_dash)
+
+tf1_in = input.timeframe("5",   "Matrix TF 1", group=grp_dash)
+tf2_in = input.timeframe("15",  "Matrix TF 2", group=grp_dash)
+tf3_in = input.timeframe("30",  "Matrix TF 3", group=grp_dash)
+tf4_in = input.timeframe("60",  "Matrix TF 4", group=grp_dash)
+tf5_in = input.timeframe("240", "Matrix TF 5", group=grp_dash)
+
+// ==========================================
+// 8. Inputs - Risk / ATR Settings
+// ==========================================
+grp_risk  = "Risk / ATR Settings"
+atrPer    = input.int(14, "ATR Period", group=grp_risk)
+atrMult   = input.float(3.0, "ATR Multiplier", step=0.1, group=grp_risk)
+
+// ==========================================
+// 9. Session Calculations
+// ==========================================
+s1Session = str.format("{0,number,00}{1,number,00}-{2,number,00}{3,number,00}", 
+            s1StartHour, s1StartMinute, s1StopHour, s1StopMinute)
+s2Session = str.format("{0,number,00}{1,number,00}-{2,number,00}{3,number,00}", 
+            s2StartHour, s2StartMinute, s2StopHour, s2StopMinute)
+
+tfForSession = (timeframe.isseconds or timeframe.isticks) ? "1" : timeframe.period
+
+inSession1 = not na(time(tfForSession, s1Session, tz))
+inSession2 = useSession2 and not na(time(tfForSession, s2Session, tz))
+inSession  = inSession1 or inSession2
+
+// ==========================================
+// 10. Core Indicators
+// ==========================================
+newSession = inSession1 and not inSession1[1]
+
+vwapVal = ta.vwap
+ema1    = ta.ema(src, ema1Len)
+ema2    = ta.ema(src, ema2Len)
+ema200  = ta.ema(src, 200)
+
+bullishTrend = (src > vwapVal) and (ema1 > ema2)
+bearishTrend = (src < vwapVal) and (ema1 < ema2)
+
+// ==========================================
+// 11. Opening Range Breakout (ORB) Logic
+// ==========================================
+var float orh = na
+var float orl = na
+var int orbEndTime = na
+var float boLongLevel = na
+var float boShortLevel = na
+
+if newSession
+    orbEndTime := time + (orbMins * 60 * 1000)
+    orh := high
+    orl := low
+    boLongLevel := na
+    boShortLevel := na
+else if time < orbEndTime
+    orh := math.max(orh, high)
+    orl := math.min(orl, low)
+else if na(boLongLevel) and not na(orh)
+    buffer = breakoutTicks * syminfo.mintick
+    boLongLevel := orh + buffer
+    boShortLevel := orl - buffer
+
+orbActive = time >= orbEndTime and not na(boLongLevel)
+
+// ==========================================
+// 12. Daily Levels
+// ==========================================
+d_h  = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_on)
+d_l  = request.security(syminfo.tickerid, "D", low, lookahead=barmerge.lookahead_on)
+pd_h = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pd_l = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+
+// ==========================================
+// 13. Weekly Levels
+// ==========================================
+w_h  = request.security(syminfo.tickerid, "W", high, lookahead=barmerge.lookahead_on)
+w_l  = request.security(syminfo.tickerid, "W", low, lookahead=barmerge.lookahead_on)
+pw_h = request.security(syminfo.tickerid, "W", high[1], lookahead=barmerge.lookahead_on)
+pw_l = request.security(syminfo.tickerid, "W", low[1], lookahead=barmerge.lookahead_on)
+
+// ==========================================
+// 14. VIX/VXN/GVZ Data
+// ==========================================
+vixValue = request.security("CBOE:VIX", "D", close, lookahead=barmerge.lookahead_on)
+vxnValue = request.security("CBOE:VXN", "D", close, lookahead=barmerge.lookahead_on)
+gvzValue = request.security("CBOE:GVZ", "D", close, lookahead=barmerge.lookahead_on)
+
+// ==========================================
+// 15. MTF Matrix Data
+// ==========================================
+// MTF Matrix: Using lookahead_off for consistent confirmed-bar values across all chart timeframes
+[c1, v1, e1] = request.security(syminfo.tickerid, tf1_in, [close, ta.vwap, ta.ema(close, ema2Len)], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[c2, v2, e2] = request.security(syminfo.tickerid, tf2_in, [close, ta.vwap, ta.ema(close, ema2Len)], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[c3, v3, e3] = request.security(syminfo.tickerid, tf3_in, [close, ta.vwap, ta.ema(close, ema2Len)], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[c4, v4, e4] = request.security(syminfo.tickerid, tf4_in, [close, ta.vwap, ta.ema(close, ema2Len)], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[c5, v5, e5] = request.security(syminfo.tickerid, tf5_in, [close, ta.vwap, ta.ema(close, ema2Len)], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+// HTF Trend Confirmation: Also using lookahead_off for consistency with matrix signals
+[htfClose, htfEma2] = request.security(syminfo.tickerid, htf, [close, ta.ema(close, ema2Len)], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+htfBull = htfClose > htfEma2
+htfBear = htfClose < htfEma2
+
+// ==========================================
+// 16. Signal Logic with Execution Modes
+// ==========================================
+bool longLevelSet = not na(boLongLevel)
+bullCross = longLevelSet and (execMode == "Intrabar (Instant)" ? (high > boLongLevel and high[1] <= boLongLevel) : ta.crossover(close, boLongLevel))
+
+bool shortLevelSet = not na(boShortLevel)
+bearCross = shortLevelSet and (execMode == "Intrabar (Instant)" ? (low < boShortLevel and low[1] >= boShortLevel) : ta.crossunder(close, boShortLevel))
+
+buySignal  = orbActive and bullishTrend and htfBull and bullCross and inSession
+sellSignal = orbActive and bearishTrend and htfBear and bearCross and inSession
+
+// ==========================================
+// 17. ATR Calculation (kept for reference)
+// ==========================================
+atr = ta.atr(atrPer)
+
+// ==========================================
+// 18. Visuals - ORB Lines
+// ==========================================
+plot(orbActive ? orh : na, "ORB High", color=color.new(color.green, 20), style=plot.style_linebr)
+plot(orbActive ? orl : na, "ORB Low", color=color.new(color.red, 20), style=plot.style_linebr)
+fill(plot(orbActive ? orh : na, display=display.none), plot(orbActive ? orl : na, display=display.none), color=color.new(color.navy, 90))
+
+plot(orbActive and breakoutTicks > 0 ? boLongLevel : na, "BO Long Level", color=color.new(color.green, 50), style=plot.style_linebr, linewidth=1)
+plot(orbActive and breakoutTicks > 0 ? boShortLevel : na, "BO Short Level", color=color.new(color.red, 50), style=plot.style_linebr, linewidth=1)
+
+// ==========================================
+// 19. Visuals - Daily & Weekly Levels
+// ==========================================
+plot(showDailyLevels ? d_h : na, "Daily High", color=dailyHiColor, style=plot.style_line, linewidth=2)
+plot(showDailyLevels ? d_l : na, "Daily Low", color=dailyLoColor, style=plot.style_line, linewidth=2)
+plot(showDailyLevels ? pd_h : na, "Prev Daily High", color=prevDailyHiColor, style=plot.style_line, linewidth=1)
+plot(showDailyLevels ? pd_l : na, "Prev Daily Low", color=prevDailyLoColor, style=plot.style_line, linewidth=1)
+
+plot(showWeeklyLevels ? w_h : na, "Weekly High", color=weeklyHiColor, style=plot.style_line, linewidth=2)
+plot(showWeeklyLevels ? w_l : na, "Weekly Low", color=weeklyLoColor, style=plot.style_line, linewidth=2)
+plot(showWeeklyLevels ? pw_h : na, "Prev Weekly High", color=prevWeeklyHiColor, style=plot.style_line, linewidth=1)
+plot(showWeeklyLevels ? pw_l : na, "Prev Weekly Low", color=prevWeeklyLoColor, style=plot.style_line, linewidth=1)
+
+// ==========================================
+// 20. Visuals - EMAs
+// ==========================================
+emaPlot1 = plot(ema1, "EMA 1", color=ema1Color, linewidth=2)
+emaPlot2 = plot(ema2, "EMA 2", color=ema2Color, linewidth=2)
+emaCloudColor = ema1 > ema2 ? color.new(color.green, 80) : color.new(color.red, 80)
+fill(emaPlot1, emaPlot2, color=showCloud ? emaCloudColor : na, title="EMA Cloud")
+
+plot(showEma200 ? ema200 : na, "EMA 200", color=ema200Color, linewidth=2)
+
+// VWAP
+plot(showVwap ? vwapVal : na, "VWAP", color=vwapColor, linewidth=2)
+
+// Signal labels
+if buySignal
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+if sellSignal
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// ==========================================
+// 21. Dashboard
+// ==========================================
+var table dash = table.new(dashPos == "Top Right" ? position.top_right : dashPos == "Bottom Right" ? position.bottom_right : position.top_left, 7, 25, border_width=1)
+
+// Color palette
+colG   = color.new(color.lime, 0)
+colR   = color.new(color.red, 0)
+colLightG = color.new(#90EE90, 0)
+colOrange = color.new(color.orange, 0)
+colN   = color.new(#334455, 0)
+colTxt = color.white
+colHead = color.new(#1a2a3a, 0)
+colBg = color.new(#0d1a26, 0)
+colOutOfSession = color.new(#2a3a4a, 0)
+colSection = color.new(#1e3a5f, 0)
+
+txtSize = dashSize == "Tiny" ? size.tiny : dashSize == "Small" ? size.small : size.normal
+
+// Helper: Check proximity to High/Low
+nearCheck(p, h, l) =>
+    pct = 0.002
+    isNearH = math.abs(p - h) <= (p * pct)
+    isNearL = math.abs(p - l) <= (p * pct)
+    isNearH ? 1 : isNearL ? -1 : 0
+
+// Helper: Check proximity to level
+nearLevel(p, level) =>
+    if na(p) or na(level)
+        0
+    else
+        pct = 0.001
+        isNear = math.abs(p - level) <= (p * pct)
+        isNear ? 1 : 0
+
+// Helper: Draw Matrix Row
+drawRow(rIdx, name, c, v, e21, d_h, d_l, pd_h, pd_l) =>
+    isBull = c > e21
+    isVwap = c > v
+    isOrb  = (orbActive and c > orh) ? 1 : (orbActive and c < orl) ? -1 : 0
+    d_stat = nearCheck(c, d_h, d_l)
+    pd_stat = nearCheck(c, pd_h, pd_l)
+    
+    orbColor = isOrb == 1 ? colG : isOrb == -1 ? colR : colN
+    clrORB = not inSession ? colOutOfSession : orbColor
+    orbTextColor = (isOrb == 0 or not inSession) ? color.white : color.black
+    
+    table.cell(dash, 0, rIdx, name, bgcolor=colBg, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 1, rIdx, isBull ? "Bull" : "Bear", bgcolor=isBull ? colG : colR, text_color=color.black, text_size=txtSize)
+    table.cell(dash, 2, rIdx, isVwap ? "> VW" : "< VW", bgcolor=isVwap ? colG : colR, text_color=color.black, text_size=txtSize)
+    table.cell(dash, 3, rIdx, isOrb == 1 ? "BrkOut" : isOrb == -1 ? "BrkDwn" : "Range", bgcolor=clrORB, text_color=orbTextColor, text_size=txtSize)
+    table.cell(dash, 4, rIdx, d_stat == 1 ? "Hi" : d_stat == -1 ? "Lo" : "Mid", bgcolor=d_stat == 1 ? colG : d_stat == -1 ? colR : colN, text_color=d_stat == 0 ? color.white : color.black, text_size=txtSize)
+    table.cell(dash, 5, rIdx, pd_stat == 1 ? "Hi" : pd_stat == -1 ? "Lo" : "Mid", bgcolor=pd_stat == 1 ? colG : pd_stat == -1 ? colR : colN, text_color=pd_stat == 0 ? color.white : color.black, text_size=txtSize)
+
+// Helper: Draw Level Row with price + proximity
+drawLevelRow(rIdx, name, levelHi, levelLo, hiColor, loColor) =>
+    nearHi = nearLevel(close, levelHi)
+    nearLo = nearLevel(close, levelLo)
+    
+    hiStatus = nearHi == 1 ? "NEAR" : (close > levelHi ? "Above" : "Below")
+    loStatus = nearLo == 1 ? "NEAR" : (close < levelLo ? "Below" : "Above")
+    
+    hiBg = nearHi == 1 ? color.new(color.yellow, 30) : (close > levelHi ? colG : colN)
+    loBg = nearLo == 1 ? color.new(color.yellow, 30) : (close < levelLo ? colR : colN)
+    hiTxtColor = nearHi == 1 ? color.black : (close > levelHi ? color.black : color.white)
+    loTxtColor = nearLo == 1 ? color.black : (close < levelLo ? color.black : color.white)
+    
+    table.cell(dash, 0, rIdx, name, bgcolor=colBg, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 1, rIdx, "H:", bgcolor=colBg, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 2, rIdx, str.tostring(levelHi, format.mintick), bgcolor=colBg, text_color=hiColor, text_size=txtSize)
+    table.cell(dash, 3, rIdx, hiStatus, bgcolor=hiBg, text_color=hiTxtColor, text_size=txtSize)
+    table.cell(dash, 4, rIdx, "L:", bgcolor=colBg, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 5, rIdx, str.tostring(levelLo, format.mintick), bgcolor=colBg, text_color=loColor, text_size=txtSize)
+    table.cell(dash, 6, rIdx, loStatus, bgcolor=loBg, text_color=loTxtColor, text_size=txtSize)
+
+if barstate.islast and showDash
+    // === MTF MATRIX HEADER ===
+    table.cell(dash, 0, 0, "TF", bgcolor=colHead, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 1, 0, "Trend", bgcolor=colHead, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 2, 0, "VWAP", bgcolor=colHead, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 3, 0, "ORB", bgcolor=colHead, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 4, 0, "D H/L", bgcolor=colHead, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 5, 0, "PD H/L", bgcolor=colHead, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 6, 0, "", bgcolor=colHead, text_color=colTxt, text_size=txtSize)
+
+    // === LIVE ROW (real-time current chart TF) ===
+    colLive = color.new(#1a3a1a, 0)  // Dark green tint to distinguish from confirmed rows
+    liveIsBull = close > ema2
+    liveIsVwap = close > vwapVal
+    liveIsOrb  = (orbActive and close > orh) ? 1 : (orbActive and close < orl) ? -1 : 0
+    liveD_stat = nearCheck(close, d_h, d_l)
+    livePD_stat = nearCheck(close, pd_h, pd_l)
+    liveOrbColor = liveIsOrb == 1 ? colG : liveIsOrb == -1 ? colR : colN
+    liveClrORB = not inSession ? colOutOfSession : liveOrbColor
+    liveOrbTextColor = (liveIsOrb == 0 or not inSession) ? color.white : color.black
+
+    table.cell(dash, 0, 1, "Live", bgcolor=colLive, text_color=color.rgb(100, 255, 100), text_size=txtSize)
+    table.cell(dash, 1, 1, liveIsBull ? "Bull" : "Bear", bgcolor=liveIsBull ? colG : colR, text_color=color.black, text_size=txtSize)
+    table.cell(dash, 2, 1, liveIsVwap ? "> VW" : "< VW", bgcolor=liveIsVwap ? colG : colR, text_color=color.black, text_size=txtSize)
+    table.cell(dash, 3, 1, liveIsOrb == 1 ? "BrkOut" : liveIsOrb == -1 ? "BrkDwn" : "Range", bgcolor=liveClrORB, text_color=liveOrbTextColor, text_size=txtSize)
+    table.cell(dash, 4, 1, liveD_stat == 1 ? "Hi" : liveD_stat == -1 ? "Lo" : "Mid", bgcolor=liveD_stat == 1 ? colG : liveD_stat == -1 ? colR : colN, text_color=liveD_stat == 0 ? color.white : color.black, text_size=txtSize)
+    table.cell(dash, 5, 1, livePD_stat == 1 ? "Hi" : livePD_stat == -1 ? "Lo" : "Mid", bgcolor=livePD_stat == 1 ? colG : livePD_stat == -1 ? colR : colN, text_color=livePD_stat == 0 ? color.white : color.black, text_size=txtSize)
+
+    // === MTF ROWS (confirmed bars) ===
+    drawRow(2, tf1_in, c1, v1, e1, d_h, d_l, pd_h, pd_l)
+    drawRow(3, tf2_in, c2, v2, e2, d_h, d_l, pd_h, pd_l)
+    drawRow(4, tf3_in, c3, v3, e3, d_h, d_l, pd_h, pd_l)
+    drawRow(5, tf4_in, c4, v4, e4, d_h, d_l, pd_h, pd_l)
+    drawRow(6, tf5_in, c5, v5, e5, d_h, d_l, pd_h, pd_l)
+
+    // Track current row
+    rowIdx = 7
+    
+    // === VIX/VXN SECTION ===
+    table.cell(dash, 0, rowIdx, "VOLATILITY INDEX", bgcolor=colSection, text_color=colTxt, text_size=txtSize)
+    table.merge_cells(dash, 0, rowIdx, 6, rowIdx)
+    rowIdx += 1
+    
+    // VIX Row (thresholds: <15 Bullish, 15-20 Slightly Bullish, 20-25 Slightly Bearish, >25 Bearish)
+    vixColor = vixValue < 15 ? colG : vixValue < 20 ? colLightG : vixValue < 25 ? colOrange : colR
+    vixLabel = vixValue < 15 ? "Bullish" : vixValue < 20 ? "Sl. Bullish" : vixValue < 25 ? "Sl. Bearish" : "Bearish"
+    table.cell(dash, 0, rowIdx, "VIX (ES)", bgcolor=colBg, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 1, rowIdx, str.tostring(vixValue, "#.##"), bgcolor=colBg, text_color=vixColor, text_size=txtSize)
+    table.merge_cells(dash, 1, rowIdx, 2, rowIdx)
+    table.cell(dash, 3, rowIdx, vixLabel, bgcolor=vixColor, text_color=color.black, text_size=txtSize)
+    table.merge_cells(dash, 3, rowIdx, 6, rowIdx)
+    rowIdx += 1
+    
+    // VXN Row (thresholds: <18 Bullish, 18-23 Slightly Bullish, 23-28 Slightly Bearish, >28 Bearish)
+    vxnColor = vxnValue < 18 ? colG : vxnValue < 23 ? colLightG : vxnValue < 28 ? colOrange : colR
+    vxnLabel = vxnValue < 18 ? "Bullish" : vxnValue < 23 ? "Sl. Bullish" : vxnValue < 28 ? "Sl. Bearish" : "Bearish"
+    table.cell(dash, 0, rowIdx, "VXN (NQ)", bgcolor=colBg, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 1, rowIdx, str.tostring(vxnValue, "#.##"), bgcolor=colBg, text_color=vxnColor, text_size=txtSize)
+    table.merge_cells(dash, 1, rowIdx, 2, rowIdx)
+    table.cell(dash, 3, rowIdx, vxnLabel, bgcolor=vxnColor, text_color=color.black, text_size=txtSize)
+    table.merge_cells(dash, 3, rowIdx, 6, rowIdx)
+    rowIdx += 1
+    
+    // GVZ Row — Neutral volatility labels (gold is a safe haven; high vol ≠ bearish)
+    // Thresholds: <15 Low Vol, 15-20 Moderate, 20-30 Elevated, >30 Extreme
+    gvzColor = gvzValue < 15 ? colG : gvzValue < 20 ? colLightG : gvzValue < 30 ? colOrange : colR
+    gvzLabel = gvzValue < 15 ? "Low Vol" : gvzValue < 20 ? "Moderate" : gvzValue < 30 ? "Elevated" : "Extreme"
+    table.cell(dash, 0, rowIdx, "GVZ (GC)", bgcolor=colBg, text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 1, rowIdx, str.tostring(gvzValue, "#.##"), bgcolor=colBg, text_color=gvzColor, text_size=txtSize)
+    table.merge_cells(dash, 1, rowIdx, 2, rowIdx)
+    table.cell(dash, 3, rowIdx, gvzLabel, bgcolor=gvzColor, text_color=color.black, text_size=txtSize)
+    table.merge_cells(dash, 3, rowIdx, 6, rowIdx)
+    rowIdx += 1
+
+    // === KEY LEVELS SECTION (TOGGLEABLE) ===
+    if showKeyLevels
+        table.cell(dash, 0, rowIdx, "KEY LEVELS", bgcolor=colSection, text_color=colTxt, text_size=txtSize)
+        table.merge_cells(dash, 0, rowIdx, 6, rowIdx)
+        rowIdx += 1
+        
+        drawLevelRow(rowIdx, "Daily", d_h, d_l, color.lime, color.red)
+        rowIdx += 1
+        drawLevelRow(rowIdx, "Prev D", pd_h, pd_l, color.lime, color.red)
+        rowIdx += 1
+        drawLevelRow(rowIdx, "Weekly", w_h, w_l, color.lime, color.red)
+        rowIdx += 1
+        drawLevelRow(rowIdx, "Prev W", pw_h, pw_l, color.lime, color.red)
+        rowIdx += 1
+        
+        // ORB Row
+        if orbActive
+            drawLevelRow(rowIdx, "ORB", orh, orl, color.green, color.red)
+        else
+            table.cell(dash, 0, rowIdx, "ORB", bgcolor=colBg, text_color=colTxt, text_size=txtSize)
+            table.cell(dash, 1, rowIdx, "", bgcolor=colOutOfSession, text_color=colTxt, text_size=txtSize)
+            table.cell(dash, 2, rowIdx, "Not Active", bgcolor=colOutOfSession, text_color=colTxt, text_size=txtSize)
+            table.merge_cells(dash, 2, rowIdx, 6, rowIdx)
+        rowIdx += 1
+
+    // === EXECUTION MODE ROW ===
+    execText = execMode == "On Close (Confirmed)" ? "On Close" : "Intrabar"
+    bufferText = breakoutTicks > 0 ? " | Buffer: " + str.tostring(breakoutTicks) + " ticks" : ""
+    sessionText = inSession ? (inSession1 ? "S1" : "S2") : "OFF"
+    
+    table.cell(dash, 0, rowIdx, "Exec", bgcolor=color.new(color.purple, 70), text_color=colTxt, text_size=txtSize)
+    table.cell(dash, 1, rowIdx, execText + bufferText, bgcolor=color.new(color.purple, 70), text_color=colTxt, text_size=txtSize)
+    table.merge_cells(dash, 1, rowIdx, 4, rowIdx)
+    table.cell(dash, 5, rowIdx, "Sess: " + sessionText, bgcolor=inSession ? color.new(color.green, 70) : colOutOfSession, text_color=colTxt, text_size=txtSize)
+    table.merge_cells(dash, 5, rowIdx, 6, rowIdx)
+
+// ==========================================
+// 22. Alerts
+// ==========================================
+alertcondition(buySignal, "Long Signal", "Long Breakout Detected")
+alertcondition(sellSignal, "Short Signal", "Short Breakout Detected")
