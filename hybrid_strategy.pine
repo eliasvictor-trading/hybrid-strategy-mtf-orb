@@ -1,16 +1,50 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © EliasVictor
-// Hybrid Strategy v2.4.2: Trend/ORB/MTF with Per-Session ORB, Session VWAP,
+// Hybrid Strategy v2.4.6: Trend/ORB/MTF with Per-Session ORB, Session VWAP,
 // Gap-Resistant Breakouts, Signal Dedup, MTF ORB Confluence & Configurable Volatility Regimes
 //
 // NOTES:
 // - This indicator supports both time-based and tick charts.
 // - Opening Range logic is always clock-time based, even on tick charts.
-// - Example: a 15-minute ORB on a tick chart still tracks the first 15 real minutes of the session.
+// - Example: a 5-minute ORB on a tick chart still tracks the first 5 real minutes of the session.
 // - When Session 2 is enabled, each session builds its own independent ORB.
 // - ORB data expires after a configurable window (default 18 hours) to prevent stale weekend/holiday signals.
 // - Signals are deduplicated: one entry per direction per ORB session.
 // - MTF VWAP column always uses exchange VWAP; live row and signals use the selected VWAP anchor mode.
+//
+// CHANGELOG v2.4.6a:
+// - Dashboard polish only; no change to core entry/alert logic
+// - Filled VOL rows with compact Risk/Product/Action/Dly context
+// - Added compact GapY/GapN status to Exec row for gap-breakout filter visibility
+// - Preserved v2.4.6 Trade State row and same dashboard-width layout
+//
+// CHANGELOG v2.4.6:
+// - Renamed dashboard Theme output from BUY / SELL / SIT to LONG BIAS / SHORT BIAS / SIT
+// - Added Trade State reason labels: ALIGNED, MIXED, OUT OF SESSION, VWAP N/A, ORB NOT READY
+// - Preserved existing score logic based on live trend, HTF confirmation, ORB position, and session readiness
+// - Updated VIX/VXN/GVZ daily requests from lookahead_on to lookahead_off to reduce forward-looking dashboard behavior
+// - No changes to core entry logic, alerts, JSON payloads, ORB calculation, VWAP calculation, or MTF matrix logic
+// - Kept VWAP dashboard column sizing closer to v2.4.5 by preserving the prior Trend/HTF/ORB column layout
+//
+// CHANGELOG v2.4.5:
+// - Clarified VWAP source mismatch in dashboard when Session VWAP is selected
+// - Added visual distinction between Live session VWAP context and MTF exchange VWAP context
+// - Added optional dashboard Theme row showing BUY / SELL / SIT bias
+// - Theme is derived from live trend, HTF confirmation, ORB position, and session readiness
+// - No change to core entry or alert logic
+//
+// CHANGELOG v2.4.4:
+// - Updated default Opening Range Duration from 15 minutes to 5 minutes
+// - Updated default Trend Confirmation TF from 60 to 30
+// - Swapped default EMA 200 and VWAP colors
+// - Updated default MA colors: MA 1 = blue, MA 2 = orange
+// - Updated default Breakout Buffer from 0 ticks to 2 ticks
+// - Enabled Afternoon Session by default
+//
+// CHANGELOG v2.4.3:
+// - Added PW H/L column to top MTF matrix using prior week's completed high/low
+// - Updated Live row and all matrix TF rows to classify price relative to PW H/L
+// - Kept existing defaults and dashboard layout intact by reusing the previously blank final matrix column
 //
 // CHANGELOG v2.4.2:
 // - Fixed session VWAP to only accumulate during active session bars
@@ -38,8 +72,8 @@
 // Prior versions: v2.0–v2.3.3 changelog available in GitHub commit history or TradingView script description.
 
 //@version=6
-VERSION     = "2.4.2"
-SCRIPT_NAME = "Hybrid Strategy: Trend/ORB/MTF v" + VERSION
+VERSION     = "2.4.6a"
+SCRIPT_NAME = "Hybrid Strategy: v" + VERSION
 
 indicator(SCRIPT_NAME, overlay=true, max_lines_count=500, max_labels_count=500)
 
@@ -49,15 +83,15 @@ indicator(SCRIPT_NAME, overlay=true, max_lines_count=500, max_labels_count=500)
 grp_session = "Session Settings"
 
 s1StartHour   = input.int(9,  "S1 Start Hour",   minval=0, maxval=23, group=grp_session)
-s1StartMinute = input.int(30, "S1 Start Minute",  minval=0, maxval=59, group=grp_session)
-s1StopHour    = input.int(11, "S1 Stop Hour",     minval=0, maxval=23, group=grp_session)
-s1StopMinute  = input.int(30, "S1 Stop Minute",   minval=0, maxval=59, group=grp_session)
+s1StartMinute = input.int(30, "S1 Start Minute", minval=0, maxval=59, group=grp_session)
+s1StopHour    = input.int(11, "S1 Stop Hour",    minval=0, maxval=23, group=grp_session)
+s1StopMinute  = input.int(30, "S1 Stop Minute",  minval=0, maxval=59, group=grp_session)
 
-useSession2   = input.bool(false, "Enable Afternoon Session", group=grp_session)
+useSession2   = input.bool(true, "Enable Afternoon Session", group=grp_session)
 s2StartHour   = input.int(15, "S2 Start Hour",   minval=0, maxval=23, group=grp_session)
-s2StartMinute = input.int(0,  "S2 Start Minute",  minval=0, maxval=59, group=grp_session)
-s2StopHour    = input.int(15, "S2 Stop Hour",     minval=0, maxval=23, group=grp_session)
-s2StopMinute  = input.int(55, "S2 Stop Minute",   minval=0, maxval=59, group=grp_session)
+s2StartMinute = input.int(0,  "S2 Start Minute", minval=0, maxval=59, group=grp_session)
+s2StopHour    = input.int(15, "S2 Stop Hour",    minval=0, maxval=23, group=grp_session)
+s2StopMinute  = input.int(55, "S2 Stop Minute",  minval=0, maxval=59, group=grp_session)
 
 // ==========================================
 // 2. Inputs - Execution Settings
@@ -72,7 +106,7 @@ execMode = input.string(
      group=grp_exec)
 
 breakoutTicks = input.int(
-     0,
+     2,
      "Breakout Buffer (Ticks)",
      minval=0,
      tooltip="Price must exceed OR level by this many ticks to trigger signal. 0 = original behavior.",
@@ -104,7 +138,7 @@ tz = tzInput == "Exchange Timezone" ? syminfo.timezone : tzInput
 grp_strat = "Strategy Settings"
 
 orbMins = input.int(
-     15,
+     5,
      "Opening Range Duration (Clock Minutes)",
      minval=1,
      tooltip="Opening Range duration in real clock minutes. This remains time-based even when the indicator is used on tick charts.",
@@ -119,7 +153,7 @@ orbMaxAgeHrs = input.float(
      group=grp_strat)
 
 htf = input.timeframe(
-     "60",
+     "30",
      "Trend Confirmation TF",
      tooltip="HTF trend updates only when a full bar completes on this timeframe. On lower chart TFs (e.g., 15s or 1m), the HTF filter may lag by up to one full bar duration.",
      group=grp_strat)
@@ -134,18 +168,18 @@ maType      = input.string("EMA", "MA Type", options=["EMA", "HMA"], tooltip="EM
 ma1Len      = input.int(9, "MA 1 Length", minval=1, group=grp_ma)
 ma2Len      = input.int(21, "MA 2 Length", minval=1, group=grp_ma)
 showCloud   = input.bool(true, "Show MA Cloud Fill", group=grp_ma)
-ma1Color    = input.color(color.rgb(255, 230, 0), "MA 1 Color", group=grp_ma)
-ma2Color    = input.color(color.rgb(0, 225, 255), "MA 2 Color", group=grp_ma)
+ma1Color    = input.color(color.rgb(0, 225, 255), "MA 1 Color", group=grp_ma)
+ma2Color    = input.color(color.rgb(255, 165, 0), "MA 2 Color", group=grp_ma)
 showEma200  = input.bool(true, "Show Anchor EMA 200", group=grp_ma)
-ema200Color = input.color(color.rgb(255, 255, 255), "Anchor EMA 200 Color", group=grp_ma)
+ema200Color = input.color(color.rgb(255, 0, 255), "Anchor EMA 200 Color", group=grp_ma)
 showVwap    = input.bool(true, "Show VWAP", group=grp_ma)
-vwapColor   = input.color(color.rgb(255, 0, 255), "VWAP Color", group=grp_ma)
+vwapColor   = input.color(color.rgb(255, 255, 255), "VWAP Color", group=grp_ma)
 
 vwapAnchor = input.string(
      "Exchange",
      "VWAP Anchor",
      options=["Exchange", "Session"],
-     tooltip="Exchange uses TradingView's built-in VWAP (anchored to exchange session, includes overnight for futures). Session resets VWAP at each custom session open (S1 or S2) and only accumulates during active session bars. Note: MTF matrix rows always use exchange VWAP regardless of this setting.",
+     tooltip="Exchange uses TradingView's built-in VWAP (anchored to exchange session, includes overnight for futures). Session resets VWAP at each custom session open (S1 or S2) and only accumulates during active session bars. Note: MTF matrix rows always use exchange VWAP regardless of anchor setting.",
      group=grp_ma)
 
 // ==========================================
@@ -174,6 +208,7 @@ showDash      = input.bool(true, "Show Dashboard", group=grp_dash)
 dashPos       = input.string("Top Right", "Position", options=["Top Right", "Bottom Right", "Top Left"], group=grp_dash)
 dashSize      = input.string("Small", "Text Size", options=["Tiny", "Small", "Normal"], group=grp_dash)
 showKeyLevels = input.bool(false, "Show Key Levels Section", group=grp_dash)
+showThemeRow  = input.bool(true, "Show Trade State Row", group=grp_dash)
 
 tf1_in = input.timeframe("5",   "Matrix TF 1", group=grp_dash)
 tf2_in = input.timeframe("15",  "Matrix TF 2", group=grp_dash)
@@ -334,7 +369,7 @@ bearishTrend = (src < vwapVal) and (ma1 < ma2)
 // not a fixed number of bars.
 //
 // Each session (S1 and S2) builds its own independent ORB.
-// ORB data expires after orbMaxAgeHrs to prevent stale weekend/holiday signals.
+// ORB data expires after orbMaxAgeHrs to prevent stale signals over weekends and holidays.
 // Signal dedup flags reset on each new session.
 var float orh           = na
 var float orl           = na
@@ -391,9 +426,9 @@ pw_l = request.security(syminfo.tickerid, "W", low[1],  lookahead=barmerge.looka
 // ==========================================
 // 14. VIX/VXN/GVZ Data
 // ==========================================
-vixValue = request.security("CBOE:VIX", "D", close, lookahead=barmerge.lookahead_on)
-vxnValue = request.security("CBOE:VXN", "D", close, lookahead=barmerge.lookahead_on)
-gvzValue = request.security("CBOE:GVZ", "D", close, lookahead=barmerge.lookahead_on)
+vixValue = request.security("CBOE:VIX", "D", close, lookahead=barmerge.lookahead_off)
+vxnValue = request.security("CBOE:VXN", "D", close, lookahead=barmerge.lookahead_off)
+gvzValue = request.security("CBOE:GVZ", "D", close, lookahead=barmerge.lookahead_off)
 
 // ==========================================
 // 15. MTF Matrix Data
@@ -407,8 +442,8 @@ gvzValue = request.security("CBOE:GVZ", "D", close, lookahead=barmerge.lookahead
 
 // HTF Trend Confirmation
 // Note: HTF trend lags by up to one full HTF bar.
-// On a 15-second chart with a 60-minute HTF, the filter reflects
-// the prior completed hourly bar for up to 59:45.
+// On a 15-second chart with a 30-minute HTF, the filter reflects
+// the prior completed HTF bar until the current one closes.
 [htfClose, htfMa2] = request.security(syminfo.tickerid, htf, [close, maCalc(close, ma2Len)], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
 htfBull = htfClose > htfMa2
 htfBear = htfClose < htfMa2
@@ -547,12 +582,53 @@ nearLevel(p, level) =>
 trendState(c, v, fastMa, slowMa) =>
     c > v and fastMa > slowMa ? 1 : c < v and fastMa < slowMa ? -1 : 0
 
+// Helper: Dashboard Trade State
+// v2.4.6 changes Theme language from BUY / SELL / SIT to
+// LONG BIAS / SHORT BIAS / SIT with a reason field.
+// This preserves the existing score inputs and does not change signals or alerts.
+tradeStateCalc(_inSession, _liveVwapNA, _trendState, _htfBull, _htfBear, _orbActive, _close, _orh, _orl) =>
+    int score = 0
+    string state = "SIT"
+    string reason = "MIXED"
+
+    if not _inSession
+        state := "SIT"
+        reason := "OUT OF SESSION"
+        [state, reason, score]
+    else if _liveVwapNA
+        state := "SIT"
+        reason := "VWAP N/A"
+        [state, reason, score]
+    else if not _orbActive
+        state := "SIT"
+        reason := "ORB NOT READY"
+        [state, reason, score]
+    else
+        int trendScore = _trendState
+        int htfScore   = _htfBull ? 1 : _htfBear ? -1 : 0
+        int orbScore   = _close > _orh ? 1 : _close < _orl ? -1 : 0
+
+        score := trendScore + htfScore + orbScore
+
+        if score >= 2
+            state := "LONG BIAS"
+            reason := "ALIGNED"
+        else if score <= -2
+            state := "SHORT BIAS"
+            reason := "ALIGNED"
+        else
+            state := "SIT"
+            reason := "MIXED"
+
+        [state, reason, score]
+
 // Helper: Draw Matrix Row
-drawRow(rIdx, name, c, v, fastMa, slowMa, d_h_val, d_l_val, pd_h_val, pd_l_val) =>
+drawRow(rIdx, name, c, v, fastMa, slowMa, d_h_val, d_l_val, pd_h_val, pd_l_val, pw_h_val, pw_l_val) =>
     tState  = trendState(c, v, fastMa, slowMa)
     isVwap  = c > v
     d_stat  = nearCheck(c, d_h_val, d_l_val)
     pd_stat = nearCheck(c, pd_h_val, pd_l_val)
+    pw_stat = nearCheck(c, pw_h_val, pw_l_val)
 
     trendText = tState == 1 ? "Bull" : tState == -1 ? "Bear" : "Mixed"
     trendBg   = tState == 1 ? colG : tState == -1 ? colR : colN
@@ -576,7 +652,9 @@ drawRow(rIdx, name, c, v, fastMa, slowMa, d_h_val, d_l_val, pd_h_val, pd_l_val) 
     dashCell(5, rIdx, pd_stat == 1 ? "Hi" : pd_stat == -1 ? "Lo" : "Mid",
              pd_stat == 1 ? colG : pd_stat == -1 ? colR : colN,
              pd_stat == 0 ? color.white : color.black)
-    dashCell(6, rIdx, "", colBg, colTxt)
+    dashCell(6, rIdx, pw_stat == 1 ? "Hi" : pw_stat == -1 ? "Lo" : "Mid",
+             pw_stat == 1 ? colG : pw_stat == -1 ? colR : colN,
+             pw_stat == 0 ? color.white : color.black)
 
 // Helper: Draw Level Row with price + proximity
 drawLevelRow(rIdx, name, levelHi, levelLo, hiColor, loColor) =>
@@ -603,15 +681,25 @@ vxnThresholdsInvalid = not (vxnThr1 < vxnThr2 and vxnThr2 < vxnThr3)
 gvzThresholdsInvalid = not (gvzThr1 < gvzThr2 and gvzThr2 < gvzThr3)
 volThresholdsInvalid = vixThresholdsInvalid or vxnThresholdsInvalid or gvzThresholdsInvalid
 
+// Compact VOL action labels for dashboard only.
+// OK  = normal/acceptable regime
+// Ctn = caution/elevated regime
+// Blk = high/extreme regime by configured thresholds
+volAction(_value, _thr2, _thr3) =>
+    _value < _thr2 ? "OK" : _value < _thr3 ? "Ctn" : "Blk"
+
+volActionColor(_action) =>
+    _action == "OK" ? colG : _action == "Ctn" ? colOrange : colR
+
 if barstate.islast and showDash
     // === MTF MATRIX HEADER ===
     dashCell(0, 0, "TF",     colHead, colTxt)
     dashCell(1, 0, "Trend",  colHead, colTxt)
-    dashCell(2, 0, "VWAP",   colHead, colTxt)
+    dashCell(2, 0, vwapAnchor == "Session" ? "VWAP*" : "VWAP", colHead, colTxt)
     dashCell(3, 0, "ORB",    colHead, colTxt)
     dashCell(4, 0, "D H/L",  colHead, colTxt)
     dashCell(5, 0, "PD H/L", colHead, colTxt)
-    dashCell(6, 0, "",        colHead, colTxt)
+    dashCell(6, 0, "PW H/L", colHead, colTxt)
 
     // === LIVE ROW ===
     colLive        = color.new(#1a3a1a, 0)
@@ -628,6 +716,7 @@ if barstate.islast and showDash
     liveIsOrb      = (orbActive and close > orh) ? 1 : (orbActive and close < orl) ? -1 : 0
     liveD_stat     = nearCheck(close, d_h, d_l)
     livePD_stat    = nearCheck(close, pd_h, pd_l)
+    livePW_stat    = nearCheck(close, pw_h, pw_l)
     liveOrbColor   = liveIsOrb == 1 ? colG : liveIsOrb == -1 ? colR : colN
     liveClrORB     = not inSession ? colOutOfSession : liveOrbColor
     liveOrbTxtClr  = (liveIsOrb == 0 or not inSession) ? color.white : color.black
@@ -636,7 +725,7 @@ if barstate.islast and showDash
     liveVwapBg     = liveVwapNA ? colOutOfSession : (liveIsVwap ? colG : colR)
     liveVwapTxt    = liveVwapNA ? color.white : color.black
 
-    dashCell(0, 1, "Live", colLive, color.rgb(100, 255, 100))
+    dashCell(0, 1, vwapAnchor == "Session" ? "Live(S)" : "Live", colLive, color.rgb(100, 255, 100))
     dashCell(1, 1, liveTrendText, liveTrendBg, liveTrendTxt)
     dashCell(2, 1, liveVwapText, liveVwapBg, liveVwapTxt)
     dashCell(3, 1, liveIsOrb == 1 ? "BrkOut" : liveIsOrb == -1 ? "BrkDwn" : "Range", liveClrORB, liveOrbTxtClr)
@@ -646,16 +735,57 @@ if barstate.islast and showDash
     dashCell(5, 1, livePD_stat == 1 ? "Hi" : livePD_stat == -1 ? "Lo" : "Mid",
              livePD_stat == 1 ? colG : livePD_stat == -1 ? colR : colN,
              livePD_stat == 0 ? color.white : color.black)
-    dashCell(6, 1, "", colBg, colTxt)
+    dashCell(6, 1, livePW_stat == 1 ? "Hi" : livePW_stat == -1 ? "Lo" : "Mid",
+             livePW_stat == 1 ? colG : livePW_stat == -1 ? colR : colN,
+             livePW_stat == 0 ? color.white : color.black)
 
     // === MTF ROWS ===
-    drawRow(2, tf1_in, c1, v1, m11, m12, d_h, d_l, pd_h, pd_l)
-    drawRow(3, tf2_in, c2, v2, m21, m22, d_h, d_l, pd_h, pd_l)
-    drawRow(4, tf3_in, c3, v3, m31, m32, d_h, d_l, pd_h, pd_l)
-    drawRow(5, tf4_in, c4, v4, m41, m42, d_h, d_l, pd_h, pd_l)
-    drawRow(6, tf5_in, c5, v5, m51, m52, d_h, d_l, pd_h, pd_l)
+    drawRow(2, tf1_in, c1, v1, m11, m12, d_h, d_l, pd_h, pd_l, pw_h, pw_l)
+    drawRow(3, tf2_in, c2, v2, m21, m22, d_h, d_l, pd_h, pd_l, pw_h, pw_l)
+    drawRow(4, tf3_in, c3, v3, m31, m32, d_h, d_l, pd_h, pd_l, pw_h, pw_l)
+    drawRow(5, tf4_in, c4, v4, m41, m42, d_h, d_l, pd_h, pd_l, pw_h, pw_l)
+    drawRow(6, tf5_in, c5, v5, m51, m52, d_h, d_l, pd_h, pd_l, pw_h, pw_l)
 
     rowIdx = 7
+
+    if vwapAnchor == "Session"
+        dashCell(0, rowIdx, "VWAP",     colSection, colTxt)
+        dashCell(1, rowIdx, "Live",     colBg, colTxt)
+        dashCell(2, rowIdx, "Session",  color.new(color.blue, 70), colTxt)
+        dashCell(3, rowIdx, "MTF",      colBg, colTxt)
+        dashCell(4, rowIdx, "Exchange", color.new(color.orange, 70), colTxt)
+        dashCell(5, rowIdx, "",         colBg, colTxt)
+        dashCell(6, rowIdx, "",         colBg, colTxt)
+        rowIdx += 1
+
+    if showThemeRow
+        [stateText, reasonText, themeScore] = tradeStateCalc(inSession, liveVwapNA, liveTrendState, htfBull, htfBear, orbActive, close, orh, orl)
+
+        stateBg  = stateText == "LONG BIAS" ? colG : stateText == "SHORT BIAS" ? colR : colN
+        stateTxt = stateText == "SIT" ? color.white : color.black
+        reasonBg = reasonText == "ALIGNED" ? color.new(color.green, 70) : reasonText == "MIXED" ? colN : colOutOfSession
+
+        trendLeg = liveTrendState == 1 ? "Trend+" : liveTrendState == -1 ? "Trend-" : "Trend0"
+        htfLeg   = htfBull ? "HTF+" : htfBear ? "HTF-" : "HTF0"
+        orbLeg   = orbActive ? (close > orh ? "ORB+" : close < orl ? "ORB-" : "ORB0") : "ORB N/A"
+
+        // Keep dashboard column widths close to v2.4.5:
+        // Column 2 remains the compact Trend leg instead of a longer Reason label.
+        reasonShort = reasonText == "ALIGNED" ? "OK" :
+             reasonText == "MIXED" ? "Mix" :
+             reasonText == "OUT OF SESSION" ? "Off" :
+             reasonText == "VWAP N/A" ? "VW N/A" :
+             reasonText == "ORB NOT READY" ? "ORB N/A" :
+             reasonText
+
+        dashCell(0, rowIdx, "State", colSection, colTxt)
+        dashCell(1, rowIdx, stateText, stateBg, stateTxt)
+        dashCell(2, rowIdx, trendLeg, colBg, colTxt)
+        dashCell(3, rowIdx, htfLeg, colBg, colTxt)
+        dashCell(4, rowIdx, orbLeg, colBg, colTxt)
+        dashCell(5, rowIdx, reasonShort, reasonBg, colTxt)
+        dashCell(6, rowIdx, str.tostring(themeScore), colBg, colTxt)
+        rowIdx += 1
 
     if volThresholdsInvalid
         dashCell(0, rowIdx, "WARNING", color.new(color.red, 15), colTxt)
@@ -678,39 +808,45 @@ if barstate.islast and showDash
     rowIdx += 1
 
     // === VIX ROW ===
-    vixColor = vixValue < vixThr1 ? colG : vixValue < vixThr2 ? colLightG : vixValue < vixThr3 ? colOrange : colR
-    vixLabel = vixValue < vixThr1 ? "Bullish" : vixValue < vixThr2 ? "Sl. Bullish" : vixValue < vixThr3 ? "Sl. Bearish" : "Bearish"
+    vixColor  = vixValue < vixThr1 ? colG : vixValue < vixThr2 ? colLightG : vixValue < vixThr3 ? colOrange : colR
+    vixLabel  = vixValue < vixThr1 ? "Bullish" : vixValue < vixThr2 ? "Sl. Bullish" : vixValue < vixThr3 ? "Sl. Bearish" : "Bearish"
+    vixAction = volAction(vixValue, vixThr2, vixThr3)
+    vixActBg  = volActionColor(vixAction)
     dashCell(0, rowIdx, "VIX (ES)", colBg, colTxt)
     dashCell(1, rowIdx, str.tostring(vixValue, "#.##"), colBg, vixColor)
-    dashCell(2, rowIdx, "", colBg, colTxt)
+    dashCell(2, rowIdx, "Risk", colBg, colTxt)
     dashCell(3, rowIdx, vixLabel, vixColor, color.black)
-    dashCell(4, rowIdx, "", vixColor, color.black)
-    dashCell(5, rowIdx, "", vixColor, color.black)
-    dashCell(6, rowIdx, "", vixColor, color.black)
+    dashCell(4, rowIdx, "ES", vixColor, color.black)
+    dashCell(5, rowIdx, vixAction, vixActBg, color.black)
+    dashCell(6, rowIdx, "Dly", colBg, colTxt)
     rowIdx += 1
 
     // === VXN ROW ===
-    vxnColor = vxnValue < vxnThr1 ? colG : vxnValue < vxnThr2 ? colLightG : vxnValue < vxnThr3 ? colOrange : colR
-    vxnLabel = vxnValue < vxnThr1 ? "Bullish" : vxnValue < vxnThr2 ? "Sl. Bullish" : vxnValue < vxnThr3 ? "Sl. Bearish" : "Bearish"
+    vxnColor  = vxnValue < vxnThr1 ? colG : vxnValue < vxnThr2 ? colLightG : vxnValue < vxnThr3 ? colOrange : colR
+    vxnLabel  = vxnValue < vxnThr1 ? "Bullish" : vxnValue < vxnThr2 ? "Sl. Bullish" : vxnValue < vxnThr3 ? "Sl. Bearish" : "Bearish"
+    vxnAction = volAction(vxnValue, vxnThr2, vxnThr3)
+    vxnActBg  = volActionColor(vxnAction)
     dashCell(0, rowIdx, "VXN (NQ)", colBg, colTxt)
     dashCell(1, rowIdx, str.tostring(vxnValue, "#.##"), colBg, vxnColor)
-    dashCell(2, rowIdx, "", colBg, colTxt)
+    dashCell(2, rowIdx, "Risk", colBg, colTxt)
     dashCell(3, rowIdx, vxnLabel, vxnColor, color.black)
-    dashCell(4, rowIdx, "", vxnColor, color.black)
-    dashCell(5, rowIdx, "", vxnColor, color.black)
-    dashCell(6, rowIdx, "", vxnColor, color.black)
+    dashCell(4, rowIdx, "NQ", vxnColor, color.black)
+    dashCell(5, rowIdx, vxnAction, vxnActBg, color.black)
+    dashCell(6, rowIdx, "Dly", colBg, colTxt)
     rowIdx += 1
 
     // === GVZ ROW ===
-    gvzColor = gvzValue < gvzThr1 ? colG : gvzValue < gvzThr2 ? colLightG : gvzValue < gvzThr3 ? colOrange : colR
-    gvzLabel = gvzValue < gvzThr1 ? "Low Vol" : gvzValue < gvzThr2 ? "Moderate" : gvzValue < gvzThr3 ? "Elevated" : "Extreme"
+    gvzColor  = gvzValue < gvzThr1 ? colG : gvzValue < gvzThr2 ? colLightG : gvzValue < gvzThr3 ? colOrange : colR
+    gvzLabel  = gvzValue < gvzThr1 ? "Low Vol" : gvzValue < gvzThr2 ? "Moderate" : gvzValue < gvzThr3 ? "Elevated" : "Extreme"
+    gvzAction = volAction(gvzValue, gvzThr2, gvzThr3)
+    gvzActBg  = volActionColor(gvzAction)
     dashCell(0, rowIdx, "GVZ (GC)", colBg, colTxt)
     dashCell(1, rowIdx, str.tostring(gvzValue, "#.##"), colBg, gvzColor)
-    dashCell(2, rowIdx, "", colBg, colTxt)
+    dashCell(2, rowIdx, "Risk", colBg, colTxt)
     dashCell(3, rowIdx, gvzLabel, gvzColor, color.black)
-    dashCell(4, rowIdx, "", gvzColor, color.black)
-    dashCell(5, rowIdx, "", gvzColor, color.black)
-    dashCell(6, rowIdx, "", gvzColor, color.black)
+    dashCell(4, rowIdx, "GC", gvzColor, color.black)
+    dashCell(5, rowIdx, gvzAction, gvzActBg, color.black)
+    dashCell(6, rowIdx, "Dly", colBg, colTxt)
     rowIdx += 1
 
     // === KEY LEVELS SECTION ===
@@ -736,29 +872,30 @@ if barstate.islast and showDash
         if orbActive
             drawLevelRow(rowIdx, "ORB", orh, orl, color.green, color.red)
         else
-            dashCell(0, rowIdx, "ORB",          colBg, colTxt)
-            dashCell(1, rowIdx, "",             colOutOfSession, colTxt)
-            dashCell(2, rowIdx, "Not Active",   colOutOfSession, colTxt)
-            dashCell(3, rowIdx, "",             colOutOfSession, colTxt)
-            dashCell(4, rowIdx, "",             colOutOfSession, colTxt)
-            dashCell(5, rowIdx, "",             colOutOfSession, colTxt)
-            dashCell(6, rowIdx, "",             colOutOfSession, colTxt)
+            dashCell(0, rowIdx, "ORB",        colBg, colTxt)
+            dashCell(1, rowIdx, "",           colOutOfSession, colTxt)
+            dashCell(2, rowIdx, "Not Active", colOutOfSession, colTxt)
+            dashCell(3, rowIdx, "",           colOutOfSession, colTxt)
+            dashCell(4, rowIdx, "",           colOutOfSession, colTxt)
+            dashCell(5, rowIdx, "",           colOutOfSession, colTxt)
+            dashCell(6, rowIdx, "",           colOutOfSession, colTxt)
         rowIdx += 1
 
     // === EXEC ROW ===
     execText    = execMode == "On Close (Confirmed)" ? "On Close" : "Intrabar"
     tickText    = breakoutTicks > 0 ? str.tostring(breakoutTicks) + "t" : "-"
+    gapText     = filterGaps ? "GapY" : "GapN"
     sessionText = inSession ? (inSession1 ? "S1" : "S2") : "OFF"
     execBg      = color.new(color.purple, 70)
     sessBg      = inSession ? color.new(color.green, 70) : colOutOfSession
 
-    dashCell(0, rowIdx, "Exec",        execBg, colTxt)
-    dashCell(1, rowIdx, execText,      execBg, colTxt)
-    dashCell(2, rowIdx, tickText,      execBg, colTxt)
-    dashCell(3, rowIdx, maType,        execBg, colTxt)
-    dashCell(4, rowIdx, "",            execBg, colTxt)
-    dashCell(5, rowIdx, "Sess:",       sessBg, colTxt)
-    dashCell(6, rowIdx, sessionText,   sessBg, colTxt)
+    dashCell(0, rowIdx, "Exec",      execBg, colTxt)
+    dashCell(1, rowIdx, execText,    execBg, colTxt)
+    dashCell(2, rowIdx, tickText,    execBg, colTxt)
+    dashCell(3, rowIdx, maType,      execBg, colTxt)
+    dashCell(4, rowIdx, gapText,     execBg, colTxt)
+    dashCell(5, rowIdx, "Sess:",     sessBg, colTxt)
+    dashCell(6, rowIdx, sessionText, sessBg, colTxt)
 
 // ==========================================
 // 22. Alerts (Plain + Optional JSON Webhook)
