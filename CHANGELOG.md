@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## [v2.4.6a] - 2026-05-13
+
+### Changed
+- Updated Theme row language to reduce execution-pressure wording.
+- Replaced BUY / SELL dashboard language with LONG BIAS / SHORT BIAS / SIT.
+- Preserved the v2.4.6 Trade State row and dashboard-width layout.
+- Filled VOL rows with compact Risk / Product / Action / Dly context.
+- Added compact GapY / GapN status to the Exec row for gap-breakout filter visibility.
+
+### Unchanged
+- No changes to core entry logic.
+- No changes to alerts, JSON payloads, ORB calculation, VWAP calculation, or MTF matrix logic.
+
+### Repository Sync Note
+GitHub was previously behind at v2.4.2. This release syncs the repository to the currently published TradingView version, v2.4.6a.
+
 ## [v2.4.2] - 2026-03-23
 
 ### Added
